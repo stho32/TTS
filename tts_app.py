@@ -16,10 +16,12 @@ import wave
 import re
 import time
 import uuid
+import random
 import traceback
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
+from typing import List, Tuple
 
 # On Windows, winsound is available in the standard library; we'll prefer pygame if available
 try:
@@ -48,10 +50,10 @@ APP_TITLE = "TTS Player (OpenAI)"
 DEFAULT_MODEL = "gpt-4o-mini-tts"
 DEFAULT_VOICE = "alloy"
 SUPPORTED_VOICES = [
-    # Common example voices; adjust to what your account supports
-    "alloy", "verse", "aria", "blaze", "coral", "ember", "sage"
+    # Voices supported by OpenAI TTS as per API error message
+    "alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse", "ballad", "ash", "sage"
 ]
-CHARS_PER_CHUNK = 1800  # conservative size to avoid model limits; adjustable in UI
+CHARS_PER_CHUNK = 800  # kleinere Standardgröße für feinere Abschnitte; in der UI anpassbar
 
 
 def safe_showerror(title: str, message: str):
@@ -63,8 +65,10 @@ def safe_showerror(title: str, message: str):
 
 def split_text_to_chunks(text: str, max_chars: int) -> list:
     """
-    Split text into chunks with preference for sentence/paragraph boundaries.
-    Conservative and robust: split by double newlines into paragraphs, then sentences.
+    Splittet in kleinere, sinnvolle Abschnitte:
+    - Trennt an 1..n Leerzeilen (auch mit Spaces/Tabs)
+    - Trennt an Markdown-Überschriften (Zeilen beginnend mit 1..6 # + Space)
+    - Innerhalb eines Blocks werden Sätze gepackt bis max_chars
     """
     text = text.strip()
     if not text:
@@ -73,64 +77,85 @@ def split_text_to_chunks(text: str, max_chars: int) -> list:
     # Normalize newlines
     text = re.sub(r"\r\n?", "\n", text)
 
-    # First split by blank lines (paragraphs)
-    paragraphs = re.split(r"\n\s*\n", text)
-    sentences = []
-    sentence_sep = re.compile(r"(?<=[.!?])[\)\]\"']*\s+")  # split on sentence end, keep punctuation
+    lines = text.split("\n")
+    heading_re = re.compile(r"^\s{0,3}#{1,6}\s+")
 
-    for p in paragraphs:
-        p = p.strip()
-        if not p:
-            continue
-        # Further split into sentences
-        parts = sentence_sep.split(p)
-        # sentence_sep.split loses the separator, so we re-attach spaces appropriately
-        # We'll just keep parts as-is; they typically still end with punctuation
-        for s in parts:
-            s = s.strip()
-            if s:
-                sentences.append(s)
+    blocks = []
+    cur = []
 
-    # Now pack sentences into chunks up to max_chars
-    chunks = []
-    buf = ""
-    for s in sentences:
-        # Ensure a space between sentences when concatenating
-        candidate = (buf + " " + s).strip() if buf else s
-        if len(candidate) <= max_chars:
-            buf = candidate
+    def flush_block():
+        nonlocal cur
+        content = "\n".join(cur).strip()
+        if content:
+            blocks.append(content)
+        cur = []
+
+    for line in lines:
+        if heading_re.match(line):
+            # New block at heading
+            flush_block()
+            blocks.append(line.strip())
+        elif line.strip() == "":
+            # Blank line => end of current block
+            flush_block()
         else:
-            if buf:
-                chunks.append(buf)
-            # If single sentence is too long, hard-wrap it
-            if len(s) > max_chars:
-                start = 0
-                while start < len(s):
-                    end = min(start + max_chars, len(s))
-                    chunks.append(s[start:end])
-                    start = end
-                buf = ""
-            else:
-                buf = s
-    if buf:
-        chunks.append(buf)
+            cur.append(line)
+    flush_block()
 
-    return chunks
+    # Sentence splitter
+    sentence_sep = re.compile(r"(?<=[.!?])[\)\]""'»“”’]*\s+")
+
+    def pack_sentences(text_block: str) -> list[str]:
+        parts = sentence_sep.split(text_block.strip())
+        parts = [p.strip() for p in parts if p.strip()]
+        chunks = []
+        buf = ""
+        for s in parts:
+            candidate = (buf + " " + s).strip() if buf else s
+            if len(candidate) <= max_chars:
+                buf = candidate
+            else:
+                if buf:
+                    chunks.append(buf)
+                if len(s) > max_chars:
+                    start = 0
+                    while start < len(s):
+                        end = min(start + max_chars, len(s))
+                        chunks.append(s[start:end])
+                        start = end
+                    buf = ""
+                else:
+                    buf = s
+        if buf:
+            chunks.append(buf)
+        return chunks
+
+    all_chunks = []
+    for b in blocks:
+        all_chunks.extend(pack_sentences(b))
+
+    return all_chunks
 
 
 class TTSWorker(threading.Thread):
-    def __init__(self, ui_ref, client, model: str, voice: str, max_chars: int):
+    def __init__(self, ui_ref, client, model: str, voice: str, max_chars: int, randomize_voices: bool = True, voices: list[str] | None = None):
         super().__init__(daemon=True)
         self.ui = ui_ref
         self.client = client
         self.model = model
         self.voice = voice
         self.max_chars = max_chars
+        self.randomize_voices = randomize_voices
+        self.voices = voices or SUPPORTED_VOICES
         self.stop_event = threading.Event()
         self.skip_event = threading.Event()
+        self.prev_event = threading.Event()
+        self.pause_event = threading.Event()  # when set, playback is paused
         self.tasks = queue.Queue()  # holds text jobs
         self.temp_dir = tempfile.mkdtemp(prefix="tts_openai_")
-        self.generated_wavs = []  # list of wav file paths in order
+        self.generated_wavs: List[str | None] = []  # parallel to chunks
+        self.current_chunks: List[str] = []
+        self.current_spans: List[Tuple[int, int]] = []  # (start,end) offsets in original text
 
     def log(self, msg: str):
         self.ui.log(msg)
@@ -146,56 +171,111 @@ class TTSWorker(threading.Thread):
                 if not text:
                     self.log("Kein Text zum Vorlesen.")
                     continue
-                self.generated_wavs.clear()
-                chunks = split_text_to_chunks(text, self.max_chars)
-                total = len(chunks)
+                # Prepare chunks and spans for highlighting and seeking
+                self.current_chunks = split_text_to_chunks(text, self.max_chars)
+                total = len(self.current_chunks)
                 if total == 0:
                     self.log("Kein Inhalt nach Aufteilung gefunden.")
                     continue
+                self.current_spans = self._compute_chunk_spans(text, self.current_chunks)
+                self.generated_wavs = [None] * total
                 self.ui.set_progress_max(total)
                 self.ui.set_progress(0)
                 self.log(f"Starte Synthese und Wiedergabe ({total} Abschnitte)...")
 
-                for idx, chunk in enumerate(chunks, start=1):
+                i = 0
+                while i < total:
                     if self.stop_event.is_set():
                         self.log("Abgebrochen.")
                         break
 
-                    # Synthesize
-                    try:
-                        wav_path = self._synthesize_chunk_to_wav(chunk, idx)
-                        self.generated_wavs.append(wav_path)
-                    except Exception as e:
-                        self.log(f"Fehler bei Synthese von Abschnitt {idx}: {e}")
-                        self.log(traceback.format_exc())
-                        # On serious failure, stop further processing
-                        break
+                    # Choose voice per chunk
+                    voice_to_use = self.voice
+                    if self.randomize_voices and self.voices:
+                        try:
+                            voice_to_use = random.choice(self.voices)
+                        except Exception:
+                            pass
+                    self.log(f"Stimme für Abschnitt {i+1}: {voice_to_use}")
 
-                    # Play
+                    # Synthesize if needed
+                    wav_path = self.generated_wavs[i]
+                    if not wav_path or not os.path.exists(wav_path):
+                        try:
+                            wav_path = self._synthesize_chunk_to_wav(self.current_chunks[i], i+1, voice_to_use)
+                            self.generated_wavs[i] = wav_path
+                        except Exception as e:
+                            self.log(f"Fehler bei Synthese von Abschnitt {i+1}: {e}")
+                            self.log(traceback.format_exc())
+                            break
+
+                    # Highlight current span in UI
+                    try:
+                        s, e = self.current_spans[i]
+                        self.ui.highlight_span(s, e)
+                    except Exception:
+                        pass
+
+                    # Play with pause/seek handling
                     if self.stop_event.is_set():
                         break
                     try:
                         self._play_wav_blocking(wav_path)
                     except Exception as e:
-                        self.log(f"Fehler bei Wiedergabe von Abschnitt {idx}: {e}")
+                        self.log(f"Fehler bei Wiedergabe von Abschnitt {i+1}: {e}")
                         self.log(traceback.format_exc())
                         break
 
-                    self.ui.set_progress(idx)
-                    self.ui.set_status(f"Abgespielt: {idx}/{total}")
-
+                    # Decide next index based on events
+                    if self.stop_event.is_set():
+                        break
+                    if self.prev_event.is_set():
+                        self.prev_event.clear()
+                        i = max(0, i - 1)
+                        self.ui.set_progress(i)
+                        self.ui.set_status(f"Zurück zu Abschnitt {i+1}/{total}")
+                        continue
+                    # default progress forward; skip_event just accelerates move to next
+                    self.ui.set_progress(i + 1)
+                    self.ui.set_status(f"Abgespielt: {i+1}/{total}")
+                    i += 1
                     if self.skip_event.is_set():
-                        # Reset skip flag after effect
                         self.skip_event.clear()
+                        # i already advanced; nothing else to do
+                        continue
 
                 self.ui.on_job_finished(not self.stop_event.is_set())
                 self.stop_event.clear()
                 self.skip_event.clear()
+                self.prev_event.clear()
+                self.pause_event.clear()
+
         except Exception as e:
             self.log(f"Unerwarteter Fehler im Worker: {e}")
             self.log(traceback.format_exc())
         finally:
             self.log("Worker beendet.")
+    @staticmethod
+    def _compute_chunk_spans(full_text: str, chunks: List[str]) -> List[Tuple[int, int]]:
+        spans: List[Tuple[int, int]] = []
+        # Normalize same as in split to ensure matching
+        norm_text = re.sub(r"\r\n?", "\n", full_text)
+        cursor = 0
+        for ch in chunks:
+            ch_norm = ch
+            idx = norm_text.find(ch_norm, cursor)
+            if idx == -1:
+                # Fallback: search from start if not found forward
+                idx = norm_text.find(ch_norm)
+            if idx == -1:
+                # If still not found, approximate by taking next slice of length
+                idx = cursor
+                end = min(len(norm_text), cursor + len(ch_norm))
+            else:
+                end = idx + len(ch_norm)
+            spans.append((idx, end))
+            cursor = end
+        return spans
 
     def submit_text(self, text: str):
         self.tasks.put({"text": text})
@@ -227,6 +307,36 @@ class TTSWorker(threading.Thread):
         except Exception:
             pass
 
+    def request_prev(self):
+        self.prev_event.set()
+        try:
+            if pygame is not None and pygame.mixer.get_init():
+                pygame.mixer.music.stop()
+        except Exception:
+            pass
+        try:
+            if winsound is not None:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+
+    def toggle_pause(self):
+        # Toggle pause state; only effective with pygame backend
+        if not self.pause_event.is_set():
+            self.pause_event.set()
+            try:
+                if pygame is not None and pygame.mixer.get_init():
+                    pygame.mixer.music.pause()
+            except Exception:
+                pass
+        else:
+            self.pause_event.clear()
+            try:
+                if pygame is not None and pygame.mixer.get_init():
+                    pygame.mixer.music.unpause()
+            except Exception:
+                pass
+
     def shutdown(self):
         # Signal thread to stop loop
         self.tasks.put(None)
@@ -243,7 +353,7 @@ class TTSWorker(threading.Thread):
         except Exception:
             pass
 
-    def _synthesize_chunk_to_wav(self, text: str, index: int) -> str:
+    def _synthesize_chunk_to_wav(self, text: str, index: int, voice: str) -> str:
         # Prefer streaming response to write directly to file for SDK compatibility
         self.ui.set_status(f"Synthese Abschnitt {index}...")
         self.log(f"Synthese Abschnitt {index} (Zeichen: {len(text)})")
@@ -254,7 +364,7 @@ class TTSWorker(threading.Thread):
         try:
             with self.client.audio.speech.with_streaming_response.create(
                 model=self.model,
-                voice=self.voice,
+                voice=voice,
                 input=text,
                 response_format="wav",
             ) as response:
@@ -264,7 +374,7 @@ class TTSWorker(threading.Thread):
             self.log(f"Hinweis: Fallback ohne Streaming (Grund: {stream_err})")
             resp = self.client.audio.speech.create(
                 model=self.model,
-                voice=self.voice,
+                voice=voice,
                 input=text,
                 response_format="wav",
             )
@@ -304,7 +414,7 @@ class TTSWorker(threading.Thread):
         return file_path
 
     def _play_wav_blocking(self, wav_path: str):
-        if self.stop_event.is_set() or self.skip_event.is_set():
+        if self.stop_event.is_set():
             return
         # Log and play; ensure file exists and has content
         try:
@@ -323,11 +433,24 @@ class TTSWorker(threading.Thread):
                     pygame.mixer.init()
                 pygame.mixer.music.load(wav_path)
                 pygame.mixer.music.play()
-                # Wait until it's done or a stop/skip is requested
+                # Wait until it's done or a stop/skip is requested; honor pause_event
                 while pygame.mixer.music.get_busy():
-                    if self.stop_event.is_set() or self.skip_event.is_set():
+                    if self.stop_event.is_set() or self.skip_event.is_set() or self.prev_event.is_set():
                         pygame.mixer.music.stop()
                         break
+                    if self.pause_event.is_set():
+                        try:
+                            pygame.mixer.music.pause()
+                        except Exception:
+                            pass
+                        # Wait in paused state until unpaused or a control event arrives
+                        while self.pause_event.is_set() and not (self.stop_event.is_set() or self.skip_event.is_set() or self.prev_event.is_set()):
+                            time.sleep(0.05)
+                        try:
+                            if not (self.stop_event.is_set() or self.skip_event.is_set() or self.prev_event.is_set()):
+                                pygame.mixer.music.unpause()
+                        except Exception:
+                            pass
                     time.sleep(0.05)
                 # Attempt to release file handle explicitly
                 try:
@@ -342,6 +465,9 @@ class TTSWorker(threading.Thread):
 
         if winsound is None:
             raise RuntimeError("Kein Wiedergabe-Backend verfügbar (pygame/winsound).")
+        # winsound hat keine Pause; bei Pause bleibt die Steuerung ohne Wirkung
+        if self.pause_event.is_set():
+            self.log("Hinweis: Pause wird mit winsound nicht unterstützt.")
         winsound.PlaySound(wav_path, winsound.SND_FILENAME | getattr(winsound, 'SND_NODEFAULT', 0))
 
 
@@ -351,16 +477,18 @@ class App(tk.Tk):
         self.title(APP_TITLE)
         self.geometry("900x650")
         self.minsize(760, 520)
+        self._is_paused = False
 
         self._ensure_env()
         self.client = self._init_client()
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
         self.voice_var = tk.StringVar(value=DEFAULT_VOICE)
+        self.random_voice_var = tk.BooleanVar(value=True)
         self.max_chars_var = tk.IntVar(value=CHARS_PER_CHUNK)
 
         self._build_ui()
 
-        self.worker = TTSWorker(self, self.client, self.model_var.get(), self.voice_var.get(), self.max_chars_var.get())
+        self.worker = TTSWorker(self, self.client, self.model_var.get(), self.voice_var.get(), self.max_chars_var.get(), self.random_voice_var.get(), SUPPORTED_VOICES)
         self.worker.start()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -395,8 +523,11 @@ class App(tk.Tk):
         self.voice_combo = ttk.Combobox(ctrl, textvariable=self.voice_var, values=SUPPORTED_VOICES, width=16)
         self.voice_combo.pack(side=tk.LEFT, padx=(4, 12))
 
+        self.random_voice_chk = ttk.Checkbutton(ctrl, text="Zufällige Stimme je Abschnitt", variable=self.random_voice_var)
+        self.random_voice_chk.pack(side=tk.LEFT, padx=(0, 12))
+
         ttk.Label(ctrl, text="Max. Zeichen/Abschnitt:").pack(side=tk.LEFT)
-        self.max_chars_spin = ttk.Spinbox(ctrl, from_=400, to=8000, increment=100, textvariable=self.max_chars_var, width=8)
+        self.max_chars_spin = ttk.Spinbox(ctrl, from_=200, to=4000, increment=100, textvariable=self.max_chars_var, width=8)
         self.max_chars_spin.pack(side=tk.LEFT, padx=(4, 12))
 
         self.update_btn = ttk.Button(ctrl, text="Einstellungen übernehmen", command=self.apply_settings)
@@ -413,11 +544,17 @@ class App(tk.Tk):
         self.start_btn = ttk.Button(play, text="Vorlesen", command=self.on_start)
         self.start_btn.pack(side=tk.LEFT)
 
+        self.pause_btn = ttk.Button(play, text="Pause", command=self.on_pause_resume)
+        self.pause_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.prev_btn = ttk.Button(play, text="Zurück", command=self.on_prev)
+        self.prev_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.next_btn = ttk.Button(play, text="Weiter", command=self.on_skip)
+        self.next_btn.pack(side=tk.LEFT, padx=(6, 0))
+
         self.stop_btn = ttk.Button(play, text="Stopp", command=self.on_stop)
         self.stop_btn.pack(side=tk.LEFT, padx=(6, 0))
-
-        self.skip_btn = ttk.Button(play, text="Überspringen", command=self.on_skip)
-        self.skip_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         self.clear_btn = ttk.Button(play, text="Text leeren", command=self.on_clear)
         self.clear_btn.pack(side=tk.LEFT, padx=(12, 0))
@@ -446,6 +583,8 @@ class App(tk.Tk):
             self.worker.model = self.model_var.get().strip()
             self.worker.voice = self.voice_var.get().strip()
             self.worker.max_chars = int(self.max_chars_var.get())
+            self.worker.randomize_voices = bool(self.random_voice_var.get())
+            self.worker.voices = SUPPORTED_VOICES
             self.set_status("Einstellungen übernommen.")
         except Exception as e:
             safe_showerror("Einstellungen", f"Fehler beim Übernehmen der Einstellungen: {e}")
@@ -456,16 +595,21 @@ class App(tk.Tk):
             safe_showerror("Eingabe", "Bitte geben Sie Text zum Vorlesen ein.")
             return
         self.disable_controls_during_playback()
+        self.pause_btn.configure(state=tk.NORMAL, text="Pause")
+        self._is_paused = False
         self.set_status("Starte...")
         self.worker.submit_text(text)
 
     def on_stop(self):
         self.worker.request_stop()
+        self._is_paused = False
+        self.pause_btn.configure(text="Pause")
         self.set_status("Stopp angefordert...")
 
     def on_skip(self):
+        # also acts as "Weiter"
         self.worker.request_skip()
-        self.set_status("Überspringen angefordert...")
+        self.set_status("Weiter/Überspringen angefordert...")
 
     def on_clear(self):
         self.text.delete("1.0", tk.END)
@@ -510,6 +654,10 @@ class App(tk.Tk):
         self.model_entry.configure(state=tk.DISABLED)
         self.voice_combo.configure(state=tk.DISABLED)
         self.max_chars_spin.configure(state=tk.DISABLED)
+        self.prev_btn.configure(state=tk.NORMAL)
+        self.next_btn.configure(state=tk.NORMAL)
+        self.stop_btn.configure(state=tk.NORMAL)
+        self.pause_btn.configure(state=tk.NORMAL)
 
     def enable_controls(self):
         self.start_btn.configure(state=tk.NORMAL)
@@ -517,6 +665,10 @@ class App(tk.Tk):
         self.model_entry.configure(state=tk.NORMAL)
         self.voice_combo.configure(state=tk.NORMAL)
         self.max_chars_spin.configure(state=tk.NORMAL)
+        self.prev_btn.configure(state=tk.DISABLED)
+        self.next_btn.configure(state=tk.DISABLED)
+        self.stop_btn.configure(state=tk.DISABLED)
+        self.pause_btn.configure(state=tk.DISABLED, text="Pause")
 
     def on_job_finished(self, completed: bool):
         if completed:
@@ -539,6 +691,44 @@ class App(tk.Tk):
         except Exception:
             pass
         self.destroy()
+
+    def on_prev(self):
+        self.worker.request_prev()
+        self.set_status("Zurück angefordert...")
+
+    def on_pause_resume(self):
+        # Toggle pause state in worker and adjust button text
+        self.worker.toggle_pause()
+        self._is_paused = not self._is_paused
+        self.pause_btn.configure(text=("Fortsetzen" if self._is_paused else "Pause"))
+
+    def highlight_span(self, start_char: int, end_char: int):
+        # Safely schedule UI update on main thread
+        def _do():
+            try:
+                self.text.tag_delete("current")
+            except Exception:
+                pass
+            try:
+                self.text.tag_configure("current", background="#cde6ff")
+            except Exception:
+                pass
+            # Convert char offsets to Tk indices
+            start_index = f"1.0+{start_char}c"
+            end_index = f"1.0+{end_char}c"
+            self.text.tag_add("current", start_index, end_index)
+            # Also select in the widget selection for clarity
+            try:
+                self.text.tag_remove(tk.SEL, "1.0", tk.END)
+                self.text.tag_add(tk.SEL, start_index, end_index)
+            except Exception:
+                pass
+            self.text.see(start_index)
+        # Use after to run in UI thread
+        try:
+            self.after(0, _do)
+        except Exception:
+            _do()
 
     @staticmethod
     def combine_wavs(wav_paths, out_path):
@@ -571,6 +761,8 @@ def main():
     if not os.environ.get("OPENAI_API_KEY"):
         print("Hinweis: Setzen Sie OPENAI_API_KEY vor dem Start der Anwendung.")
     app = App()
+    # Initialize control states
+    app.enable_controls()
     app.mainloop()
 
 
