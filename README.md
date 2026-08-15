@@ -1,51 +1,92 @@
-# TTS - Text-to-Speech mit OpenAI
+# TTS
 
-Desktop-Anwendung zur Text-zu-Sprache-Konvertierung ueber die OpenAI TTS-API.
+Text-to-Speech-Anwendungen auf Basis der OpenAI-TTS-API mit Tkinter-GUI.
 
-## Features
+Dieses Repository enthaelt UV-basierte Python-Anwendungen als Single-File-Scripts.
 
-- Mehrere Stimmen (alloy, echo, fable, onyx, nova, shimmer, coral, verse, ballad, ash, sage)
-- Zufaellige Stimmenwahl pro Textabschnitt
-- Intelligente Textaufteilung an Absaetzen und Markdown-Ueberschriften
-- Wiedergabesteuerung: Play, Pause, Stopp, Vor, Zurueck
-- Hervorhebung des aktuell vorgelesenen Abschnitts
-- Export als WAV-Datei
-- Konfigurierbarer Chunk-Groesse (200-4000 Zeichen)
+## Struktur
+
+- **Anforderungen/** — Anforderungsdokumente fuer die Apps (Markdown-Dateien)
+- **Apps/** — Fertige UV-Single-File-Scripts
 
 ## Voraussetzungen
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (empfohlen)
-- OpenAI API-Schluessel
+- Python >= 3.11
+- [UV](https://docs.astral.sh/uv/) als Script-Runner
+- Umgebungsvariable `OPENAI_API_KEY`
+- Linux: ggf. `python3-tk` fuer Tkinter
 
-## Nutzung
+```bash
+# UV installieren
+curl -LsSf https://astral.sh/uv/install.sh | sh                                    # Linux/macOS
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"  # Windows
+```
 
-1. Environment-Variable setzen:
-   ```bash
-   # Windows (PowerShell)
-   $env:OPENAI_API_KEY = "sk-..."
+## Verwendung
 
-   # Linux/macOS
-   export OPENAI_API_KEY="sk-..."
-   ```
+### App ausfuehren
 
-2. Anwendung starten:
-   ```bash
-   # Windows (Batch-Script)
-   start_tts.bat
+```bash
+export OPENAI_API_KEY="sk-..."       # Linux/macOS
+uv run Apps/tts-player.py
+```
 
-   # Direkt mit uv
-   uv run tts_app.py
+```powershell
+$env:OPENAI_API_KEY = "sk-..."       # Windows (PowerShell)
+uv run Apps\tts-player.py
+```
 
-   # Linux-Variante
-   uv run tts_app_linux.py
-   ```
+Debug-Logging:
 
-3. Text eingeben oder einfuegen, Stimme und Modell waehlen, "Vorlesen" klicken.
+```bash
+uv run Apps/tts-player.py --verbose
+```
 
-## Abhaengigkeiten
+### Windows-Starter
 
-Die Abhaengigkeiten werden ueber PEP 723 inline script metadata verwaltet und von `uv` automatisch installiert:
+| Datei | Zweck |
+|---|---|
+| `start_tts.bat` | Startet `Apps\tts-player.py` im Repo-Verzeichnis |
+| `start_tts_hidden.vbs` | Ruft `start_tts.bat` ohne sichtbares Konsolenfenster auf |
 
-- `openai>=1.40.0`
-- `pygame>=2.6.0`
+`start_tts_hidden.vbs` enthaelt den absoluten Pfad `C:\Projekte\TTS` — bei abweichendem
+Ablageort dort anpassen.
+
+### Neue App erstellen
+
+1. Anforderungsdokument in `Anforderungen/` anlegen (`/erstelle-anforderung`)
+2. App in `Apps/` implementieren (`/implementiere RXXXXX`)
+3. Tabelle unten ergaenzen
+
+## Apps
+
+| App | Beschreibung | Anforderung |
+|-----|--------------|-------------|
+| `Apps/tts-player.py` | TTS-Player mit pygame und winsound-Fallback (Windows) | [R00001](Anforderungen/R00001-tts-player.md) |
+| `Apps/tts-player-linux.py` | TTS-Player, ausschliesslich pygame als Backend | [R00002](Anforderungen/R00002-tts-player-linux.md) |
+
+## Funktionsumfang
+
+- Zerlegung laengerer Texte in Abschnitte an Absatz- und Ueberschriften-Grenzen
+- Synthese je Abschnitt ueber `gpt-4o-mini-tts`, Antwortformat WAV
+- 11 Stimmen, optional zufaellig je Abschnitt
+- Wiedergabesteuerung: Start, Pause, Stopp, vor, zurueck
+- Export aller Abschnitte als einzelne WAV-Datei
+
+## UV Single-File Script Format
+
+Jede App ist ein einzelnes Python-Script mit eingebetteten Abhaengigkeiten (PEP 723):
+
+```python
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "openai>=1.40.0",
+#     "pygame>=2.6.0",
+# ]
+# ///
+```
+
+UV loest die Abhaengigkeiten beim ersten Start selbst auf — kein `requirements.txt`,
+keine manuelle Virtualenv-Verwaltung.

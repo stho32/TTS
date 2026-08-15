@@ -7,6 +7,16 @@
 # ]
 # ///
 
+"""
+TTS-Player fuer Linux mit Tkinter-GUI: wandelt Text ueber die OpenAI-TTS-API in
+Sprache um, spielt sie abschnittsweise ab und kann das Ergebnis als WAV exportieren.
+Audio-Backend: ausschliesslich pygame.
+
+Anforderungen: siehe ../Anforderungen/R00002-tts-player-linux.md
+"""
+
+import argparse
+import logging
 import os
 import sys
 import threading
@@ -49,6 +59,20 @@ SUPPORTED_VOICES = [
     "alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse", "ballad", "ash", "sage"
 ]
 CHARS_PER_CHUNK = 800  # kleinere Standardgröße für feinere Abschnitte; in der UI anpassbar
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="TTS-Player fuer Linux mit OpenAI-TTS-API und Tkinter-GUI")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Debug-Logging aktivieren")
+    return parser.parse_args()
 
 
 def safe_showerror(title: str, message: str):
@@ -98,7 +122,7 @@ def split_text_to_chunks(text: str, max_chars: int) -> list:
     flush_block()
 
     # Sentence splitter
-    sentence_sep = re.compile(r"(?<=[.!?])[\)\]""'»""']*\s+")
+    sentence_sep = re.compile(r"""(?<=[.!?])[\)\]"'»“”’]*\s+""")
 
     def pack_sentences(text_block: str) -> list[str]:
         parts = sentence_sep.split(text_block.strip())
@@ -620,6 +644,7 @@ class App(tk.Tk):
         self.status_lbl.update_idletasks()
 
     def log(self, msg: str):
+        logger.info(msg)
         self.log_txt.configure(state=tk.NORMAL)
         self.log_txt.insert(tk.END, msg + "\n")
         self.log_txt.see(tk.END)
@@ -732,20 +757,31 @@ class App(tk.Tk):
 
 
 def main():
-    # Early checks and guidance for Linux
-    if pygame is None:
-        print(f"Fehler: pygame konnte nicht importiert werden: {PYGAME_IMPORT_ERROR}")
-        print("Installieren Sie pygame: pip install pygame")
+    args = parse_args()
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    try:
+        logger.info("App gestartet")
+        # Early checks and guidance for Linux
+        if pygame is None:
+            logger.error(f"pygame konnte nicht importiert werden: {PYGAME_IMPORT_ERROR}")
+            logger.error("Installieren Sie pygame: pip install pygame")
+            sys.exit(1)
+
+        if not os.environ.get("OPENAI_API_KEY"):
+            logger.warning("OPENAI_API_KEY ist nicht gesetzt — Synthese wird fehlschlagen.")
+            logger.warning("Beispiel: export OPENAI_API_KEY='your-api-key-here'")
+
+        app = App()
+        # Initialize control states
+        app.enable_controls()
+        app.mainloop()
+        logger.info("App beendet")
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.error(f"Unerwarteter Fehler: {e}", exc_info=True)
         sys.exit(1)
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("Hinweis: Setzen Sie OPENAI_API_KEY vor dem Start der Anwendung.")
-        print("Beispiel: export OPENAI_API_KEY='your-api-key-here'")
-
-    app = App()
-    # Initialize control states
-    app.enable_controls()
-    app.mainloop()
 
 
 if __name__ == "__main__":

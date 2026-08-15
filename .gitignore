@@ -1,10 +1,35 @@
+# Python
 __pycache__/
-*.pyc
-.venv/
-.env
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
 dist/
 build/
-*.egg-info/
-.idea/
+*.egg
+
+# Virtual environments (should not exist with UV single-file scripts, but just in case)
+.venv/
+venv/
+ENV/
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Generierte Audio-Dateien
+*.wav

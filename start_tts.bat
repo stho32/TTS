@@ -1,3 +1,3 @@
 @echo off
-cd /d "C:\Projekte\TTS"
-uv run tts_app.py
+cd /d "%~dp0"
+uv run Apps\tts-player.py
