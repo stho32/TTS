@@ -61,10 +61,17 @@ APP_TITLE = "TTS Player (OpenAI)"
 DEFAULT_MODEL = "gpt-4o-mini-tts"
 DEFAULT_VOICE = "alloy"
 SUPPORTED_VOICES = [
-    # Voices supported by OpenAI TTS as per API error message
-    "alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse", "ballad", "ash", "sage"
+    # Stimmen der OpenAI-TTS-API (Stand: August 2026)
+    "alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse", "ballad", "ash", "sage",
+    "marin", "cedar"
 ]
+# tts-1 und tts-1-hd unterstuetzen nur die aeltere, kleinere Stimmenmenge
+LEGACY_MODELS = ("tts-1", "tts-1-hd")
+LEGACY_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 CHARS_PER_CHUNK = 800  # kleinere Standardgröße für feinere Abschnitte; in der UI anpassbar
+DEFAULT_SPEED = 1.0
+SPEED_MIN = 0.25  # von der API vorgegebener Bereich
+SPEED_MAX = 4.0
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +80,20 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+
+def voices_for_model(model: str) -> list:
+    """Stimmen, die das gewaehlte Modell akzeptiert."""
+    return LEGACY_VOICES if model.strip() in LEGACY_MODELS else SUPPORTED_VOICES
+
+
+def clamp_speed(value) -> float:
+    """Tempo auf den von der API erlaubten Bereich begrenzen."""
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SPEED
+    return min(max(speed, SPEED_MIN), SPEED_MAX)
 
 
 def parse_args():
@@ -163,7 +184,7 @@ def split_text_to_chunks(text: str, max_chars: int) -> list:
 
 
 class TTSWorker(threading.Thread):
-    def __init__(self, ui_ref, client, model: str, voice: str, max_chars: int, randomize_voices: bool = True, voices: list[str] | None = None):
+    def __init__(self, ui_ref, client, model: str, voice: str, max_chars: int, randomize_voices: bool = True, voices: list[str] | None = None, speed: float = DEFAULT_SPEED):
         super().__init__(daemon=True)
         self.ui = ui_ref
         self.client = client
@@ -172,6 +193,7 @@ class TTSWorker(threading.Thread):
         self.max_chars = max_chars
         self.randomize_voices = randomize_voices
         self.voices = voices or SUPPORTED_VOICES
+        self.speed = clamp_speed(speed)
         self.stop_event = threading.Event()
         self.skip_event = threading.Event()
         self.prev_event = threading.Event()
@@ -381,7 +403,7 @@ class TTSWorker(threading.Thread):
     def _synthesize_chunk_to_wav(self, text: str, index: int, voice: str) -> str:
         # Prefer streaming response to write directly to file for SDK compatibility
         self.ui.set_status(f"Synthese Abschnitt {index}...")
-        self.log(f"Synthese Abschnitt {index} (Zeichen: {len(text)})")
+        self.log(f"Synthese Abschnitt {index} (Zeichen: {len(text)}, Stimme: {voice}, Tempo: {self.speed:g}x)")
         unique = uuid.uuid4().hex[:8]
         file_path = os.path.join(self.temp_dir, f"part_{index:04d}_{unique}.wav")
 
@@ -392,6 +414,7 @@ class TTSWorker(threading.Thread):
                 voice=voice,
                 input=text,
                 response_format="wav",
+                speed=self.speed,
             ) as response:
                 response.stream_to_file(file_path)
         except Exception as stream_err:
@@ -402,6 +425,7 @@ class TTSWorker(threading.Thread):
                 voice=voice,
                 input=text,
                 response_format="wav",
+                speed=self.speed,
             )
 
             audio_bytes = None
@@ -510,10 +534,11 @@ class App(tk.Tk):
         self.voice_var = tk.StringVar(value=DEFAULT_VOICE)
         self.random_voice_var = tk.BooleanVar(value=True)
         self.max_chars_var = tk.IntVar(value=CHARS_PER_CHUNK)
+        self.speed_var = tk.DoubleVar(value=DEFAULT_SPEED)
 
         self._build_ui()
 
-        self.worker = TTSWorker(self, self.client, self.model_var.get(), self.voice_var.get(), self.max_chars_var.get(), self.random_voice_var.get(), SUPPORTED_VOICES)
+        self.worker = TTSWorker(self, self.client, self.model_var.get(), self.voice_var.get(), self.max_chars_var.get(), self.random_voice_var.get(), voices_for_model(self.model_var.get()), self.speed_var.get())
         self.worker.start()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -554,6 +579,12 @@ class App(tk.Tk):
         ttk.Label(ctrl, text="Max. Zeichen/Abschnitt:").pack(side=tk.LEFT)
         self.max_chars_spin = ttk.Spinbox(ctrl, from_=200, to=4000, increment=100, textvariable=self.max_chars_var, width=8)
         self.max_chars_spin.pack(side=tk.LEFT, padx=(4, 12))
+
+        ttk.Label(ctrl, text="Tempo:").pack(side=tk.LEFT)
+        self.speed_spin = ttk.Spinbox(ctrl, from_=SPEED_MIN, to=SPEED_MAX, increment=0.05, format="%.2f", textvariable=self.speed_var, width=6)
+        self.speed_spin.pack(side=tk.LEFT, padx=(4, 4))
+        self.speed_reset_btn = ttk.Button(ctrl, text="1x", width=3, command=self.reset_speed)
+        self.speed_reset_btn.pack(side=tk.LEFT, padx=(0, 12))
 
         self.update_btn = ttk.Button(ctrl, text="Einstellungen übernehmen", command=self.apply_settings)
         self.update_btn.pack(side=tk.LEFT)
@@ -602,15 +633,33 @@ class App(tk.Tk):
         self.log_txt = ScrolledText(self, height=8, wrap=tk.WORD, state=tk.DISABLED)
         self.log_txt.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
 
+    def reset_speed(self):
+        self.speed_var.set(DEFAULT_SPEED)
+        self.apply_settings()
+
     def apply_settings(self):
         # Update worker parameters
         try:
-            self.worker.model = self.model_var.get().strip()
+            model = self.model_var.get().strip()
+            speed = clamp_speed(self.speed_var.get())
+            if speed != self.speed_var.get():
+                self.speed_var.set(speed)
+                self.log(f"Tempo auf gueltigen Bereich begrenzt ({SPEED_MIN:g}–{SPEED_MAX:g}x): {speed:g}x")
+
+            # Stimmenauswahl an das Modell anpassen: tts-1/tts-1-hd kennen die neuen Stimmen nicht
+            voices = voices_for_model(model)
+            self.voice_combo.configure(values=voices)
+            if self.voice_var.get().strip() not in voices:
+                self.log(f"Stimme '{self.voice_var.get().strip()}' wird von Modell '{model}' nicht unterstützt — wechsle auf '{voices[0]}'.")
+                self.voice_var.set(voices[0])
+
+            self.worker.model = model
             self.worker.voice = self.voice_var.get().strip()
             self.worker.max_chars = int(self.max_chars_var.get())
             self.worker.randomize_voices = bool(self.random_voice_var.get())
-            self.worker.voices = SUPPORTED_VOICES
-            self.set_status("Einstellungen übernommen.")
+            self.worker.voices = voices
+            self.worker.speed = speed
+            self.set_status(f"Einstellungen übernommen (Tempo {speed:g}x).")
         except Exception as e:
             safe_showerror("Einstellungen", f"Fehler beim Übernehmen der Einstellungen: {e}")
 
@@ -619,6 +668,8 @@ class App(tk.Tk):
         if not text.strip():
             safe_showerror("Eingabe", "Bitte geben Sie Text zum Vorlesen ein.")
             return
+        # Einstellungen (u.a. Tempo) ohne Extra-Klick uebernehmen
+        self.apply_settings()
         self.disable_controls_during_playback()
         self.pause_btn.configure(state=tk.NORMAL, text="Pause")
         self._is_paused = False
@@ -680,6 +731,8 @@ class App(tk.Tk):
         self.model_entry.configure(state=tk.DISABLED)
         self.voice_combo.configure(state=tk.DISABLED)
         self.max_chars_spin.configure(state=tk.DISABLED)
+        self.speed_spin.configure(state=tk.DISABLED)
+        self.speed_reset_btn.configure(state=tk.DISABLED)
         self.prev_btn.configure(state=tk.NORMAL)
         self.next_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.NORMAL)
@@ -691,6 +744,8 @@ class App(tk.Tk):
         self.model_entry.configure(state=tk.NORMAL)
         self.voice_combo.configure(state=tk.NORMAL)
         self.max_chars_spin.configure(state=tk.NORMAL)
+        self.speed_spin.configure(state=tk.NORMAL)
+        self.speed_reset_btn.configure(state=tk.NORMAL)
         self.prev_btn.configure(state=tk.DISABLED)
         self.next_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.DISABLED)

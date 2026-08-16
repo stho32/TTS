@@ -109,6 +109,10 @@ Kein Setup-Schritt noetig — UV loest die Abhaengigkeiten beim ersten Start auf
 ## Projektspezifisches
 
 - **API**: OpenAI TTS, Standardmodell `gpt-4o-mini-tts`, Antwortformat WAV, Streaming mit Fallback
+- **Modelle** (Stand August 2026): `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd` — kein neueres TTS-Modell
+- **Stimmen**: 13 bei `gpt-4o-mini-tts` (inkl. `marin`, `cedar`), nur 6 bei `tts-1`/`tts-1-hd`
+- **Tempo**: API-Parameter `speed` (0.25–4.0) — wirkt messbar, auch bei `gpt-4o-mini-tts`.
+  Der `instructions`-Parameter taugt nicht zur Temposteuerung (nachgemessen, siehe R00003)
 - **API-Schluessel**: ausschliesslich ueber `OPENAI_API_KEY`, niemals im Code
 - **GUI**: Tkinter; Synthese und Wiedergabe laufen im Hintergrund-Thread, die GUI bleibt bedienbar
 - **Audio**: pygame; `Apps/tts-player.py` hat zusaetzlich `winsound` als Windows-Fallback

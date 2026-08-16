@@ -62,14 +62,16 @@ Ablageort dort anpassen.
 
 | App | Beschreibung | Anforderung |
 |-----|--------------|-------------|
-| `Apps/tts-player.py` | TTS-Player mit pygame und winsound-Fallback (Windows) | [R00001](Anforderungen/R00001-tts-player.md) |
-| `Apps/tts-player-linux.py` | TTS-Player, ausschliesslich pygame als Backend | [R00002](Anforderungen/R00002-tts-player-linux.md) |
+| `Apps/tts-player.py` | TTS-Player mit pygame und winsound-Fallback (Windows) | [R00001](Anforderungen/R00001-tts-player.md), [R00003](Anforderungen/R00003-tempo-und-neue-stimmen.md) |
+| `Apps/tts-player-linux.py` | TTS-Player, ausschliesslich pygame als Backend | [R00002](Anforderungen/R00002-tts-player-linux.md), [R00003](Anforderungen/R00003-tempo-und-neue-stimmen.md) |
 
 ## Funktionsumfang
 
 - Zerlegung laengerer Texte in Abschnitte an Absatz- und Ueberschriften-Grenzen
 - Synthese je Abschnitt ueber `gpt-4o-mini-tts`, Antwortformat WAV
-- 11 Stimmen, optional zufaellig je Abschnitt
+- Einstellbares Sprechtempo (0.25x–4.00x) ueber den `speed`-Parameter der API
+- 13 Stimmen inkl. `marin` und `cedar`, optional zufaellig je Abschnitt; bei `tts-1`/`tts-1-hd`
+  automatisch auf die 6 dort unterstuetzten Stimmen eingeschraenkt
 - Wiedergabesteuerung: Start, Pause, Stopp, vor, zurueck
 - Export aller Abschnitte als einzelne WAV-Datei
 

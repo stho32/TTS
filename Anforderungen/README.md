@@ -26,3 +26,4 @@ Anforderungsdateien sind feste Vorgaben und werden nach Erstellung nicht mehr ve
 |---|---|---|---|
 | [R00001](R00001-tts-player.md) | TTS-Player (plattformuebergreifend) | Erledigt | `Apps/tts-player.py` |
 | [R00002](R00002-tts-player-linux.md) | TTS-Player Linux-Variante | Erledigt | `Apps/tts-player-linux.py` |
+| [R00003](R00003-tempo-und-neue-stimmen.md) | Tempo-Waehler und neue Stimmen | Erledigt | beide Apps |
